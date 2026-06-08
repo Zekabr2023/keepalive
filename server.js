@@ -331,7 +331,7 @@ const validTokens = new Map();
 
 // Rate limiting em mem\u00f3ria: Map<ip, {count, resetAt}>
 const loginAttempts = new Map();
-const MAX_ATTEMPTS  = 10;
+const MAX_ATTEMPTS  = 2;
 const WINDOW_MS     = 15 * 60 * 1000; // 15 minutos
 
 function checkRateLimit(ip) {
@@ -754,13 +754,18 @@ app.post('/api/discover', async (req, res) => {
     const existing   = loadProjects().map(p => p.projectRef || extractProjectRef(p.url));
 
     const result = discovered.map(d => ({
-      ...d,
-      alreadyAdded: existing.includes(d.ref),
-      // Nunca expõe keys reais na listagem
-      anonKeyPreview:        d.anonKey        ? `${d.anonKey.substring(0,12)}...`        : null,
-      serviceRoleKeyPreview: d.serviceRoleKey ? `${d.serviceRoleKey.substring(0,12)}...` : null,
-      hasAnonKey:        !!d.anonKey,
-      hasServiceRoleKey: !!d.serviceRoleKey
+      ref:                  d.ref,
+      name:                 d.name,
+      status:               d.status,
+      region:               d.region,
+      orgId:                d.orgId,
+      url:                  d.url,
+      createdAt:            d.createdAt,
+      alreadyAdded:         existing.includes(d.ref),
+      anonKeyPreview:       d.anonKey        ? `${d.anonKey.substring(0,12)}...`        : null,
+      serviceRoleKeyPreview:d.serviceRoleKey ? `${d.serviceRoleKey.substring(0,12)}...` : null,
+      hasAnonKey:           !!d.anonKey,
+      hasServiceRoleKey:    !!d.serviceRoleKey
     }));
 
     res.json({ projects: result, count: result.length });
