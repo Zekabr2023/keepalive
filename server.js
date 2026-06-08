@@ -108,6 +108,33 @@ function saveProjects(projects) {
   fs.writeFileSync(PROJECTS_FILE, JSON.stringify(encrypted, null, 2));
 }
 
+// Mutex para evitar condições de corrida (race conditions) ao ler/gravar projects.json
+let projectsLock = Promise.resolve();
+
+function acquireProjectsLock() {
+  let release;
+  const nextLock = new Promise(resolve => { release = resolve; });
+  const currentLock = projectsLock;
+  projectsLock = nextLock;
+  return currentLock.then(() => release);
+}
+
+async function updateProjectData(id, updates) {
+  const release = await acquireProjectsLock();
+  try {
+    const projects = loadProjects();
+    const idx = projects.findIndex(p => p.id === id);
+    if (idx !== -1) {
+      projects[idx] = { ...projects[idx], ...updates };
+      saveProjects(projects);
+      return projects[idx];
+    }
+    return null;
+  } finally {
+    release();
+  }
+}
+
 function loadLogs() {
   if (!fs.existsSync(LOGS_FILE)) return [];
   try { return JSON.parse(fs.readFileSync(LOGS_FILE, 'utf8')); } catch { return []; }
@@ -233,17 +260,13 @@ async function pingProject(project) {
       signal: AbortSignal.timeout(15000)
     });
 
-    const projects = loadProjects();
-    const idx = projects.findIndex(p => p.id === id);
-
     if (res.ok || res.status === 201) {
-      if (idx !== -1) {
-        projects[idx].lastPing  = new Date().toISOString();
-        projects[idx].pingCount = (projects[idx].pingCount || 0) + 1;
-        projects[idx].status    = 'active';
-        projects[idx].lastError = null;
-        saveProjects(projects);
-      }
+      await updateProjectData(id, {
+        lastPing: new Date().toISOString(),
+        pingCount: (project.pingCount || 0) + 1,
+        status: 'active',
+        lastError: null
+      });
       addLog(id, 'success', `Ping OK • ${name}`);
       return { success: true };
     }
@@ -261,18 +284,18 @@ async function pingProject(project) {
       newStatus = 'error';
     }
 
-    if (idx !== -1) {
-      projects[idx].lastError = errMsg;
-      projects[idx].status    = newStatus;
-      saveProjects(projects);
-    }
+    await updateProjectData(id, {
+      lastError: errMsg,
+      status: newStatus
+    });
     addLog(id, 'error', `Ping falhou • ${name}: ${errMsg}`, { status: res.status });
     return { success: false, error: errMsg, status: newStatus };
 
   } catch (err) {
-    const projects = loadProjects();
-    const idx = projects.findIndex(p => p.id === id);
-    if (idx !== -1) { projects[idx].lastError = err.message; projects[idx].status = 'error'; saveProjects(projects); }
+    await updateProjectData(id, {
+      lastError: err.message,
+      status: 'error'
+    });
     addLog(id, 'error', `Ping falhou • ${name}: ${err.message}`);
     return { success: false, error: err.message };
   }
@@ -412,92 +435,74 @@ app.post('/api/auth/logout', (req, res) => {
 });
 
 // ─── API Routes ──────────────────────────────────────────────────────────────
-// Todas as rotas /api/* (exceto auth) requerem autenticação
-app.use('/api', (req, res, next) => {
-  if (req.path.startsWith('/auth/')) return next(); // rotas de auth são livres
-  requireAuth(req, res, next);
-});
-
-// Test connection before adding
-app.post('/api/projects/test', async (req, res) => {
-  const { url, anonKey, serviceRoleKey } = req.body;
-  if (!url || !anonKey) return res.status(400).json({ error: 'URL e Anon Key são obrigatórios' });
-
-  const jwt = decodeJWT(anonKey);
-  const ref = jwt?.ref || extractProjectRef(url);
-  const result = await testConnection({ url, anonKey, serviceRoleKey });
-
-  res.json({ ...result, projectRef: ref, keyInfo: jwt ? { role: jwt.role, ref: jwt.ref, exp: jwt.exp } : null });
-});
-
-// List all projects (keys masked)
-app.get('/api/projects', (req, res) => {
-  const projects = loadProjects().map(p => ({
-    ...p,
-    anonKey: p.anonKey ? `${p.anonKey.substring(0, 12)}...` : null,
-    serviceRoleKey: p.serviceRoleKey ? '[SET]' : null,
-    personalAccessToken: p.personalAccessToken ? '[SET]' : null
-  }));
-  res.json(projects);
-});
-
-// Add project
+// Todas // Add project
 app.post('/api/projects', async (req, res) => {
   const { name, url, anonKey, serviceRoleKey, personalAccessToken } = req.body;
   if (!name || !url || !anonKey) return res.status(400).json({ error: 'Nome, URL e Anon Key são obrigatórios' });
 
-  const projects = loadProjects();
-  if (projects.find(p => p.url.trim() === url.trim())) return res.status(400).json({ error: 'Já existe um projeto com esta URL' });
+  const release = await acquireProjectsLock();
+  let project;
+  try {
+    const projects = loadProjects();
+    if (projects.find(p => p.url.trim() === url.trim())) {
+      release();
+      return res.status(400).json({ error: 'Já existe um projeto com esta URL' });
+    }
 
-  const jwt = decodeJWT(anonKey);
-  const project = {
-    id: `proj_${Date.now()}`,
-    name,
-    url: url.replace(/\/$/, ''),
-    anonKey,
-    serviceRoleKey: serviceRoleKey || null,
-    personalAccessToken: personalAccessToken || null,
-    projectRef: jwt?.ref || extractProjectRef(url),
-    status: 'checking',
-    tableExists: false,
-    connected: false,
-    lastPing: null,
-    pingCount: 0,
-    lastError: null,
-    enabled: true,
-    createdAt: new Date().toISOString()
-  };
+    const jwt = decodeJWT(anonKey);
+    project = {
+      id: `proj_${Date.now()}`,
+      name,
+      url: url.replace(/\/$/, ''),
+      anonKey,
+      serviceRoleKey: serviceRoleKey || null,
+      personalAccessToken: personalAccessToken || null,
+      projectRef: jwt?.ref || extractProjectRef(url),
+      status: 'checking',
+      tableExists: false,
+      connected: false,
+      lastPing: null,
+      pingCount: 0,
+      lastError: null,
+      enabled: true,
+      createdAt: new Date().toISOString()
+    };
 
-  projects.push(project);
-  saveProjects(projects);
+    projects.push(project);
+    saveProjects(projects);
+  } finally {
+    release();
+  }
+
   addLog(project.id, 'info', `Projeto "${name}" adicionado`);
 
   // Test + auto-setup async
   (async () => {
-    const result = await testConnection(project);
-    const projs = loadProjects();
-    const idx   = projs.findIndex(p => p.id === project.id);
-    if (idx === -1) return;
+    try {
+      const result = await testConnection(project);
+      let updatedProj = await updateProjectData(project.id, result);
+      if (!updatedProj) return;
 
-    projs[idx] = { ...projs[idx], ...result };
-
-    if (!result.tableExists && personalAccessToken) {
-      const setup = await createTableWithPAT(projs[idx]);
-      if (setup.success) {
-        projs[idx].status     = 'active';
-        projs[idx].tableExists = true;
-        addLog(project.id, 'success', `Tabela _revisoes criada automaticamente`);
-        saveProjects(projs);
-        await pingProject(projs[idx]);
-        return;
-      } else {
-        addLog(project.id, 'warning', `Auto-setup falhou: ${setup.error}. Execute o SQL manualmente.`);
+      if (!result.tableExists && personalAccessToken) {
+        const setup = await createTableWithPAT(updatedProj);
+        if (setup.success) {
+          updatedProj = await updateProjectData(project.id, { status: 'active', tableExists: true });
+          addLog(project.id, 'success', `Tabela _revisoes criada automaticamente`);
+          if (updatedProj) await pingProject(updatedProj);
+          return;
+        } else {
+          addLog(project.id, 'warning', `Auto-setup falhou: ${setup.error}. Execute o SQL manualmente.`);
+          await updateProjectData(project.id, { status: 'setup_required', lastError: setup.error });
+        }
       }
-    }
 
-    saveProjects(projs);
-    addLog(project.id, result.connected ? 'success' : 'error',
-      result.connected ? `Conectado! Status: ${result.status}` : `Falha de conexão: ${result.error}`);
+      addLog(project.id, result.connected ? 'success' : 'error',
+        result.connected ? `Conectado! Status: ${result.status}` : `Falha de conexão: ${result.error}`);
+    } catch (err) {
+      console.error(`[ADD-ASYNC] Erro ao processar projeto ${project.name}:`, err);
+      await updateProjectData(project.id, { status: 'error', lastError: err.message });
+      addLog(project.id, 'error', `Erro ao inicializar projeto "${name}": ${err.message}`);
+    }
   })();
 
   res.json({
@@ -509,24 +514,34 @@ app.post('/api/projects', async (req, res) => {
 });
 
 // Delete project
-app.delete('/api/projects/:id', (req, res) => {
-  const projects = loadProjects();
-  const proj = projects.find(p => p.id === req.params.id);
-  saveProjects(projects.filter(p => p.id !== req.params.id));
-  if (proj) addLog(proj.id, 'info', `Projeto "${proj.name}" removido`);
-  res.json({ success: true });
+app.delete('/api/projects/:id', async (req, res) => {
+  const release = await acquireProjectsLock();
+  try {
+    const projects = loadProjects();
+    const proj = projects.find(p => p.id === req.params.id);
+    saveProjects(projects.filter(p => p.id !== req.params.id));
+    if (proj) addLog(proj.id, 'info', `Projeto "${proj.name}" removido`);
+    res.json({ success: true });
+  } finally {
+    release();
+  }
 });
 
 // Update (enable/disable/rename)
-app.patch('/api/projects/:id', (req, res) => {
-  const projects = loadProjects();
-  const idx = projects.findIndex(p => p.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Projeto não encontrado' });
-  const { enabled, name } = req.body;
-  if (typeof enabled !== 'undefined') projects[idx].enabled = enabled;
-  if (name) projects[idx].name = name;
-  saveProjects(projects);
-  res.json({ success: true });
+app.patch('/api/projects/:id', async (req, res) => {
+  const release = await acquireProjectsLock();
+  try {
+    const projects = loadProjects();
+    const idx = projects.findIndex(p => p.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'Projeto não encontrado' });
+    const { enabled, name } = req.body;
+    if (typeof enabled !== 'undefined') projects[idx].enabled = enabled;
+    if (name) projects[idx].name = name;
+    saveProjects(projects);
+    res.json({ success: true });
+  } finally {
+    release();
+  }
 });
 
 // Manual ping
@@ -545,11 +560,9 @@ app.post('/api/projects/:id/setup', async (req, res) => {
   if (project.personalAccessToken) {
     const result = await createTableWithPAT(project);
     if (result.success) {
-      const projs = loadProjects();
-      const idx   = projs.findIndex(p => p.id === project.id);
-      if (idx !== -1) { projs[idx].status = 'active'; projs[idx].tableExists = true; saveProjects(projs); }
+      const updatedProj = await updateProjectData(project.id, { status: 'active', tableExists: true });
       addLog(project.id, 'success', `Tabela _revisoes criada com PAT`);
-      await pingProject(loadProjects().find(p => p.id === project.id));
+      if (updatedProj) await pingProject(updatedProj);
       return res.json({ success: true, autoCreated: true });
     }
     return res.json({ success: false, autoCreated: false, error: result.error, sql: buildSetupSQL(project.name) });
@@ -560,17 +573,17 @@ app.post('/api/projects/:id/setup', async (req, res) => {
 
 // Confirm manual SQL was executed
 app.post('/api/projects/:id/confirm-setup', async (req, res) => {
-  const projects = loadProjects();
-  const idx = projects.findIndex(p => p.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Projeto não encontrado' });
+  const projectsBefore = loadProjects();
+  const projBefore = projectsBefore.find(p => p.id === req.params.id);
+  if (!projBefore) return res.status(404).json({ error: 'Projeto não encontrado' });
 
   // Se tem PAT, envia NOTIFY para recarregar o schema cache antes de testar
-  if (projects[idx].personalAccessToken) {
-    const ref = projects[idx].projectRef || extractProjectRef(projects[idx].url);
+  if (projBefore.personalAccessToken) {
+    const ref = projBefore.projectRef || extractProjectRef(projBefore.url);
     if (ref) {
       await fetch(`https://api.supabase.com/v1/projects/${ref}/database/query`, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${projects[idx].personalAccessToken}`, 'Content-Type': 'application/json' },
+        headers: { 'Authorization': `Bearer ${projBefore.personalAccessToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: `NOTIFY pgrst, 'reload schema';` }),
         signal: AbortSignal.timeout(10000)
       }).catch(() => {});
@@ -579,29 +592,28 @@ app.post('/api/projects/:id/confirm-setup', async (req, res) => {
     }
   }
 
-  const result = await testConnection(projects[idx]);
+  const result = await testConnection(projBefore);
   if (result.tableExists) {
-    projects[idx].status     = 'active';
-    projects[idx].tableExists = true;
-    projects[idx].connected   = true;
-    saveProjects(projects);
-    addLog(projects[idx].id, 'success', `Setup confirmado para "${projects[idx].name}"`);
-    await pingProject(projects[idx]);
+    const updatedProj = await updateProjectData(req.params.id, {
+      status: 'active',
+      tableExists: true,
+      connected: true
+    });
+    addLog(req.params.id, 'success', `Setup confirmado para "${projBefore.name}"`);
+    if (updatedProj) await pingProject(updatedProj);
     return res.json({ success: true });
   }
   res.json({ success: false, error: 'Tabela ainda não encontrada. Verifique se o SQL foi executado.' });
 });
 
-
 // Refresh project status
 app.post('/api/projects/:id/refresh', async (req, res) => {
   const projects = loadProjects();
-  const idx = projects.findIndex(p => p.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Projeto não encontrado' });
+  const project = projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: 'Projeto não encontrado' });
 
-  const result = await testConnection(projects[idx]);
-  projects[idx] = { ...projects[idx], ...result };
-  saveProjects(projects);
+  const result = await testConnection(project);
+  await updateProjectData(req.params.id, result);
   res.json({ success: true, ...result });
 });
 
@@ -818,33 +830,42 @@ app.post('/api/import', async (req, res) => {
         createdAt:            new Date().toISOString()
       };
 
-      const projs = loadProjects();
-      projs.push(project);
-      saveProjects(projs);
+      const release = await acquireProjectsLock();
+      try {
+        const projs = loadProjects();
+        projs.push(project);
+        saveProjects(projs);
+      } finally {
+        release();
+      }
       addLog(project.id, 'info', `Projeto "${d.name}" importado via PAT`);
 
       // Cria tabela + pinga (async)
       (async () => {
-        const connResult = await testConnection(project);
-        const ps  = loadProjects();
-        const idx = ps.findIndex(p => p.id === project.id);
-        if (idx === -1) return;
-        ps[idx] = { ...ps[idx], ...connResult };
+        try {
+          const connResult = await testConnection(project);
+          let updatedProj = await updateProjectData(project.id, connResult);
+          if (!updatedProj) return;
 
-        if (!connResult.tableExists) {
-          const setup = await createTableWithPAT(ps[idx]);
-          if (setup.success) {
-            ps[idx].status     = 'active';
-            ps[idx].tableExists = true;
-            addLog(project.id, 'success', `Tabela _revisoes criada para "${d.name}"`);
-            saveProjects(ps);
-            await pingProject(ps[idx]);
-            return;
+          if (!connResult.tableExists) {
+            const setup = await createTableWithPAT(updatedProj);
+            if (setup.success) {
+              updatedProj = await updateProjectData(project.id, { status: 'active', tableExists: true });
+              addLog(project.id, 'success', `Tabela _revisoes criada para "${d.name}"`);
+              if (updatedProj) await pingProject(updatedProj);
+              return;
+            } else {
+              addLog(project.id, 'warning', `Não foi possível criar tabela para "${d.name}": ${setup.error}`);
+              await updateProjectData(project.id, { status: 'setup_required', lastError: setup.error });
+            }
           } else {
-            addLog(project.id, 'warning', `Não foi possível criar tabela para "${d.name}": ${setup.error}`);
+            await pingProject(updatedProj);
           }
+        } catch (err) {
+          console.error(`[IMPORT-ASYNC] Erro ao processar projeto ${project.name}:`, err);
+          await updateProjectData(project.id, { status: 'error', lastError: err.message });
+          addLog(project.id, 'error', `Erro ao inicializar projeto "${d.name}": ${err.message}`);
         }
-        saveProjects(ps);
       })();
 
       results.push({ ref: d.ref, name: d.name, status: 'imported' });
@@ -870,9 +891,7 @@ async function runScheduledPings() {
       if (age > 5) {
         console.log(`[SCHED] Recuperando projeto travado: ${project.name} (status: ${project.status})`);
         const connResult = await testConnection(project);
-        const ps  = loadProjects();
-        const idx = ps.findIndex(p => p.id === project.id);
-        if (idx !== -1) { ps[idx] = { ...ps[idx], ...connResult }; saveProjects(ps); }
+        await updateProjectData(project.id, connResult);
         continue;
       }
     }

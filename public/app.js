@@ -804,7 +804,7 @@ async function loadLogs() {
 
   try {
     const url  = `${API}/api/logs?limit=100${filter ? `&projectId=${filter}` : ''}`;
-    const res  = await fetch(url);
+    const res  = await apiFetch(url);
     const logs = await res.json();
 
     if (!logs.length) {
