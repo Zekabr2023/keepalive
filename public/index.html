@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Anti-Pausa Supabase — Dashboard</title>
+  <meta name="description" content="Plataforma pessoal para manter seus projetos Supabase sempre ativos com pings automáticos." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- ─── Login Overlay ─────────────────────────────────────────── -->
+  <div id="loginOverlay" style="display:none" class="login-overlay">
+    <div class="login-card">
+      <div class="login-logo">
+        <svg width="40" height="40" viewBox="0 0 28 28" fill="none">
+          <rect width="28" height="28" rx="8" fill="url(#loginGrad)" />
+          <path d="M8 20L14 8L20 20H8Z" fill="white" opacity="0.9" />
+          <circle cx="14" cy="14" r="3" fill="white" />
+          <defs>
+            <linearGradient id="loginGrad" x1="0" y1="0" x2="28" y2="28">
+              <stop offset="0%" stop-color="#3ECF8E" />
+              <stop offset="100%" stop-color="#1c7a56" />
+            </linearGradient>
+          </defs>
+        </svg>
+      </div>
+      <h1 class="login-title">Anti-Pausa Supabase</h1>
+      <p class="login-sub">Supabase Guard — Acesso Restrito</p>
+      <form onsubmit="handleLogin(event)" class="login-form">
+        <div class="form-group">
+          <label class="form-label" for="loginPassword">Senha de acesso</label>
+          <input id="loginPassword" type="password" class="form-input"
+            placeholder="••••••••••••" autofocus required />
+        </div>
+        <p id="loginError" class="login-error" style="display:none"></p>
+        <button type="submit" class="btn btn--primary btn--full" id="loginBtn">Entrar</button>
+      </form>
+    </div>
+  </div>
+
+
+  <!-- Toast Container -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <!-- ─── PAT Import Modal ──────────────────────────────────────── -->
+  <div id="patModal" class="modal-overlay" style="display:none">
+    <div class="modal modal--wide">
+      <div class="modal-header">
+        <div class="modal-title-area">
+          <span class="modal-icon">🔑</span>
+          <div>
+            <h2 class="modal-title">Importar via Personal Access Token</h2>
+            <p class="modal-subtitle">Um único token descobre todos os seus projetos de todas as organizações</p>
+          </div>
+        </div>
+        <button class="btn-icon" onclick="closePatModal()">✕</button>
+      </div>
+      <div class="modal-body">
+
+        <!-- Step 1: PAT Input -->
+        <div id="patStep1">
+          <div class="info-box info-box--green" style="margin-bottom:16px">
+            <span class="info-icon">✨</span>
+            <div>
+              <strong>Como funciona</strong>
+              <p>Seu PAT tem acesso a <strong>todos os projetos de todas as suas organizações</strong>. O sistema lista tudo, busca as chaves automaticamente e cria a tabela <code>_revisoes</code> em cada projeto de uma vez.</p>
+            </div>
+          </div>
+
+          <div class="form-group" style="margin-bottom:16px">
+            <label class="form-label" for="pat-input">
+              Personal Access Token <span class="required">*</span>
+            </label>
+            <div class="input-with-toggle">
+              <input id="pat-input" type="password" class="form-input font-mono"
+                placeholder="sbp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" />
+              <button type="button" class="btn-toggle-eye" onclick="toggleVisibility('pat-input', this)">👁</button>
+            </div>
+            <span class="form-hint">
+              Gere em:
+              <a href="https://supabase.com/dashboard/account/tokens" target="_blank" rel="noopener">
+                supabase.com/dashboard/account/tokens
+              </a>
+              • Usado apenas localmente e salvo no seu computador.
+            </span>
+          </div>
+
+          <div id="patDiscoverResult" style="display:none"></div>
+
+          <div class="modal-actions">
+            <button class="btn btn--ghost" onclick="closePatModal()">Cancelar</button>
+            <button class="btn btn--primary" id="btnDiscover" onclick="discoverProjects()">
+              <span>🔍</span> Descobrir Meus Projetos
+            </button>
+          </div>
+        </div>
+
+        <!-- Step 2: Project Selection -->
+        <div id="patStep2" style="display:none">
+          <div class="discover-header">
+            <div class="discover-summary" id="discoverSummary"></div>
+            <button class="btn btn--ghost btn--sm" onclick="selectAllProjects()" id="btnSelectAll">Selecionar todos</button>
+          </div>
+          <div id="discoverList" class="discover-list"></div>
+          <div class="modal-actions">
+            <button class="btn btn--ghost" onclick="backToPatStep1()">← Voltar</button>
+            <button class="btn btn--primary" id="btnImport" onclick="importSelected()">
+              <span>🚀</span> Importar Selecionados
+            </button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Setup Modal ───────────────────────────────────────────── -->
+  <div id="setupModal" class="modal-overlay" style="display:none">
+    <div class="modal">
+      <div class="modal-header">
+        <div class="modal-title-area">
+          <span class="modal-icon">⚙️</span>
+          <div>
+            <h2 class="modal-title">Configurar Tabela</h2>
+            <p class="modal-subtitle" id="setupModalSubtitle">Execute o SQL abaixo no Supabase SQL Editor</p>
+          </div>
+        </div>
+        <button class="btn-icon" onclick="closeSetupModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="setupAutoSection" style="display:none">
+          <div class="info-box info-box--green">
+            <span class="info-icon">✨</span>
+            <div>
+              <strong>PAT detectado!</strong>
+              <p>A tabela será criada automaticamente usando seu Personal Access Token.</p>
+            </div>
+          </div>
+          <button id="btnAutoCreate" class="btn btn--primary btn--full" onclick="autoCreateTable()">
+            <span class="btn-icon-left">🚀</span> Criar Tabela Automaticamente
+          </button>
+        </div>
+
+        <div id="setupManualSection">
+          <div class="info-box">
+            <span class="info-icon">📋</span>
+            <div>
+              <strong>Execute este SQL no seu Supabase</strong>
+              <p>Vá em <a href="https://supabase.com/dashboard" target="_blank" rel="noopener">supabase.com/dashboard</a> → seu projeto → SQL Editor</p>
+            </div>
+          </div>
+          <div class="sql-block">
+            <div class="sql-header">
+              <span class="sql-label">SQL</span>
+              <button class="btn-copy" id="btnCopySQL" onclick="copySQLToClipboard()">
+                <span>📋</span> Copiar
+              </button>
+            </div>
+            <pre id="setupSQLContent" class="sql-code"></pre>
+          </div>
+          <div class="modal-actions">
+            <button class="btn btn--ghost" onclick="closeSetupModal()">Cancelar</button>
+            <button id="btnConfirmSetup" class="btn btn--primary" onclick="confirmSetup()">
+              <span>✅</span> Já executei o SQL!
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Add Project Modal ─────────────────────────────────────── -->
+  <div id="addModal" class="modal-overlay" style="display:none">
+    <div class="modal modal--wide">
+      <div class="modal-header">
+        <div class="modal-title-area">
+          <span class="modal-icon">➕</span>
+          <div>
+            <h2 class="modal-title">Adicionar Projeto Supabase</h2>
+            <p class="modal-subtitle">Informe as credenciais do projeto para conectar</p>
+          </div>
+        </div>
+        <button class="btn-icon" onclick="closeAddModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <form id="addProjectForm" onsubmit="handleAddProject(event)">
+          <div class="form-grid">
+            <div class="form-group form-group--full">
+              <label class="form-label" for="proj-name">
+                Nome do Projeto <span class="required">*</span>
+              </label>
+              <input id="proj-name" type="text" class="form-input" placeholder="Ex: NEF Max, Plataforma Bozza..." required />
+            </div>
+
+            <div class="form-group form-group--full">
+              <label class="form-label" for="proj-url">
+                URL do Projeto Supabase <span class="required">*</span>
+              </label>
+              <input id="proj-url" type="url" class="form-input font-mono"
+                placeholder="https://xxxxx.supabase.co" required />
+              <span class="form-hint">Encontre em Project Settings → API → Project URL</span>
+            </div>
+
+            <div class="form-group form-group--full">
+              <label class="form-label" for="proj-anon">
+                Anon Key (Chave Pública) <span class="required">*</span>
+              </label>
+              <div class="input-with-toggle">
+                <input id="proj-anon" type="password" class="form-input font-mono"
+                  placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." required />
+                <button type="button" class="btn-toggle-eye" onclick="toggleVisibility('proj-anon', this)">👁</button>
+              </div>
+              <span class="form-hint">Project Settings → API → Project API Keys → anon / public</span>
+            </div>
+
+            <div class="form-group form-group--full">
+              <label class="form-label" for="proj-service">
+                Service Role Key <span class="optional">(opcional)</span>
+              </label>
+              <div class="input-with-toggle">
+                <input id="proj-service" type="password" class="form-input font-mono"
+                  placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." />
+                <button type="button" class="btn-toggle-eye" onclick="toggleVisibility('proj-service', this)">👁</button>
+              </div>
+              <span class="form-hint">Se informado, os pings usarão esta chave (ignora RLS)</span>
+            </div>
+
+            <div class="form-group form-group--full">
+              <label class="form-label" for="proj-pat">
+                Personal Access Token <span class="optional">(opcional)</span>
+              </label>
+              <div class="input-with-toggle">
+                <input id="proj-pat" type="password" class="form-input font-mono"
+                  placeholder="sbp_xxxxxxxxxxxxxxxx..." />
+                <button type="button" class="btn-toggle-eye" onclick="toggleVisibility('proj-pat', this)">👁</button>
+              </div>
+              <span class="form-hint">
+                Se informado, a tabela <code>_revisoes</code> é criada automaticamente •
+                <a href="https://supabase.com/dashboard/account/tokens" target="_blank" rel="noopener">Gerar token</a>
+              </span>
+            </div>
+          </div>
+
+          <div id="testResult" class="test-result" style="display:none"></div>
+
+          <div class="modal-actions">
+            <button type="button" class="btn btn--ghost" onclick="closeAddModal()">Cancelar</button>
+            <button type="button" class="btn btn--outline" id="btnTest" onclick="testConnectionForm()">
+              <span>🔍</span> Testar Conexão
+            </button>
+            <button type="submit" class="btn btn--primary" id="btnAdd">
+              <span>➕</span> Adicionar Projeto
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Main Layout ───────────────────────────────────────────── -->
+  <div class="app">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-logo">
+          <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+            <rect width="28" height="28" rx="8" fill="url(#brandGrad)" />
+            <path d="M8 20L14 8L20 20H8Z" fill="white" opacity="0.9" />
+            <circle cx="14" cy="14" r="3" fill="white" />
+            <defs>
+              <linearGradient id="brandGrad" x1="0" y1="0" x2="28" y2="28">
+                <stop offset="0%" stop-color="#3ECF8E" />
+                <stop offset="100%" stop-color="#1c7a56" />
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <div>
+          <div class="brand-name">Anti-Pausa</div>
+          <div class="brand-sub">Supabase Guard</div>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <a href="#" class="nav-item nav-item--active" onclick="showSection('dashboard', event)">
+          <span class="nav-icon">📊</span>
+          <span>Dashboard</span>
+        </a>
+        <a href="#" class="nav-item" onclick="showSection('logs', event)">
+          <span class="nav-icon">📋</span>
+          <span>Logs de Atividade</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-stats">
+        <div class="stat-item">
+          <span class="stat-label">Projetos Ativos</span>
+          <span class="stat-value stat-value--green" id="sideStatActive">—</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Total de Pings</span>
+          <span class="stat-value" id="sideStatPings">—</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Servidor ativo há</span>
+          <span class="stat-value" id="sideStatUptime">—</span>
+        </div>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="next-ping-box">
+          <div class="next-ping-label">⏱ Próximo Ping em</div>
+          <div class="next-ping-value" id="nextPingCountdown">—</div>
+        </div>
+        <button class="btn btn--ghost btn--sm" style="width:100%;margin-top:8px;opacity:0.6" onclick="logout()">
+          🚪 Sair
+        </button>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main">
+
+      <!-- Header -->
+      <header class="main-header">
+        <div class="header-left">
+          <h1 id="sectionTitle">Dashboard</h1>
+          <span class="header-status">
+            <span class="status-dot status-dot--pulse"></span>
+            Sistema ativo
+          </span>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn--ghost btn--sm" onclick="refreshAll()" id="btnRefresh">
+            <span>🔄</span> Atualizar
+          </button>
+          <button class="btn btn--ghost btn--sm" onclick="pingAll()" id="btnPingAll" title="Pinga todos os projetos agora">
+            <span>⚡</span> Pingar Todos
+          </button>
+          <button class="btn btn--outline" onclick="openPatModal()" id="btnImportPAT">
+            <span>🔑</span> Importar via PAT
+          </button>
+          <button class="btn btn--primary" onclick="openAddModal()" id="btnAddProject">
+            <span>＋</span> Adicionar Projeto
+          </button>
+        </div>
+      </header>
+
+      <!-- Dashboard Section -->
+      <section id="sectionDashboard" class="section">
+        <div class="summary-grid">
+          <div class="summary-card">
+            <div class="summary-icon summary-icon--green">🟢</div>
+            <div class="summary-info">
+              <div class="summary-num" id="sumActive">0</div>
+              <div class="summary-label">Ativos</div>
+            </div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-icon summary-icon--yellow">⚠️</div>
+            <div class="summary-info">
+              <div class="summary-num" id="sumSetup">0</div>
+              <div class="summary-label">Setup Pendente</div>
+            </div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-icon summary-icon--red">⛔</div>
+            <div class="summary-info">
+              <div class="summary-num" id="sumPaused">0</div>
+              <div class="summary-label">Pausados</div>
+            </div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-icon summary-icon--blue">📊</div>
+            <div class="summary-info">
+              <div class="summary-num" id="sumTotal">0</div>
+              <div class="summary-label">Total</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section-header">
+          <h2 class="section-title">Projetos Conectados</h2>
+        </div>
+
+        <div id="projectsGrid" class="projects-grid">
+          <div class="empty-state" id="emptyState">
+            <div class="empty-icon">🗄️</div>
+            <div class="empty-title">Nenhum projeto conectado</div>
+            <div class="empty-sub">Use "Importar via PAT" para descobrir todos de uma vez, ou adicione manualmente</div>
+            <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
+              <button class="btn btn--outline" onclick="openPatModal()">🔑 Importar via PAT</button>
+              <button class="btn btn--primary" onclick="openAddModal()">＋ Adicionar Projeto</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Logs Section -->
+      <section id="sectionLogs" class="section" style="display:none">
+        <div class="section-header">
+          <h2 class="section-title">Logs de Atividade</h2>
+          <select id="logFilter" class="form-select" onchange="loadLogs()">
+            <option value="">Todos os projetos</option>
+          </select>
+        </div>
+        <div id="logsContainer" class="logs-container">
+          <div class="loading">Carregando logs...</div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

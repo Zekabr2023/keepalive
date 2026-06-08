@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  keepalive:
+    image: ghcr.io/zekabr2023/keepalive:latest
+    networks:
+      - automabo
+    environment:
+      - PORT=3131
+      - DASHBOARD_PASSWORD
+      - TZ=America/Sao_Paulo
+    volumes:
+      - keepalive_data:/app/data
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.keepalive.rule=Host(`keepalive.automabo.com.br`)"
+        - "traefik.http.routers.keepalive.entrypoints=websecure"
+        - "traefik.http.routers.keepalive.tls.certresolver=letsencryptresolver"
+        - "traefik.http.services.keepalive.loadbalancer.server.port=3131"
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+volumes:
+  keepalive_data:
+
+networks:
+  automabo:
+    external: true
+    name: automabo

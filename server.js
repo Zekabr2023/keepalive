@@ -1,0 +1,794 @@
+const express = require('express');
+const cors    = require('cors');
+const cron    = require('node-cron');
+const path    = require('path');
+const fs      = require('fs');
+const crypto  = require('crypto');
+
+const app  = express();
+const PORT = process.env.PORT || 3131;
+
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ─── Data Layer ─────────────────────────────────────────────────────────────
+const DATA_DIR = path.join(__dirname, 'data');
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+const PROJECTS_FILE = path.join(DATA_DIR, 'projects.json');
+const LOGS_FILE     = path.join(DATA_DIR, 'logs.json');
+
+function loadProjects() {
+  if (!fs.existsSync(PROJECTS_FILE)) return [];
+  try { return JSON.parse(fs.readFileSync(PROJECTS_FILE, 'utf8')); } catch { return []; }
+}
+function saveProjects(p) { fs.writeFileSync(PROJECTS_FILE, JSON.stringify(p, null, 2)); }
+
+function loadLogs() {
+  if (!fs.existsSync(LOGS_FILE)) return [];
+  try { return JSON.parse(fs.readFileSync(LOGS_FILE, 'utf8')); } catch { return []; }
+}
+function saveLogs(l) { fs.writeFileSync(LOGS_FILE, JSON.stringify(l, null, 2)); }
+
+function addLog(projectId, status, message, details = null) {
+  const logs = loadLogs();
+  const entry = { id: `${Date.now()}-${Math.random().toString(36).slice(2,7)}`, projectId, status, message, details, timestamp: new Date().toISOString() };
+  logs.unshift(entry);
+  if (logs.length > 1000) logs.splice(1000);
+  saveLogs(logs);
+  return entry;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function decodeJWT(token) {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const payload = Buffer.from(parts[1], 'base64url').toString('utf8');
+    return JSON.parse(payload);
+  } catch { return null; }
+}
+
+function extractProjectRef(url) {
+  try {
+    const m = url.match(/https?:\/\/([a-z0-9]+)\.supabase\.co/);
+    return m ? m[1] : null;
+  } catch { return null; }
+}
+
+function buildSetupSQL(projectName) {
+  return `-- ─────────────────────────────────────────────────────────────────────
+-- Setup Anti-Pausa para: ${projectName}
+-- Execute este script no SQL Editor do seu projeto Supabase
+-- Acesse: https://supabase.com/dashboard/project/_/sql
+-- ─────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS _revisoes (
+  id        BIGSERIAL     PRIMARY KEY,
+  pinged_at TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+  source    TEXT          NOT NULL DEFAULT 'anti-pausa-supabase'
+);
+
+-- Ativar RLS
+ALTER TABLE _revisoes ENABLE ROW LEVEL SECURITY;
+
+-- Permitir leitura pública (para testar conexão)
+CREATE POLICY "allow_anon_select"
+  ON _revisoes FOR SELECT TO anon USING (true);
+
+-- Permitir inserção pública (para os pings automáticos)
+CREATE POLICY "allow_anon_insert"
+  ON _revisoes FOR INSERT TO anon WITH CHECK (true);`;
+}
+
+// ─── Core Logic ──────────────────────────────────────────────────────────────
+// Erros do PostgREST que indicam que a tabela não existe no schema cache
+function isTableNotFoundError(status, body) {
+  const msg  = (body?.message || body?.error || '').toLowerCase();
+  const hint = (body?.hint   || '').toLowerCase();
+  const code  = body?.code || '';
+  return (
+    status === 404 ||
+    code === 'PGRST116' ||                           // PostgREST: relation not found
+    code === 'PGRST200' ||                           // PostgREST: schema cache miss
+    msg.includes('does not exist') ||
+    msg.includes('schema cache') ||                  // ← o erro que apareceu
+    msg.includes('could not find the table') ||
+    hint.includes('reload schema')
+  );
+}
+
+async function testConnection(project) {
+  const { url, anonKey, serviceRoleKey } = project;
+  const key = serviceRoleKey || anonKey;
+
+  try {
+    const res = await fetch(`${url}/rest/v1/_revisoes?limit=1`, {
+      headers: { 'apikey': key, 'Authorization': `Bearer ${key}` },
+      signal: AbortSignal.timeout(10000)
+    });
+
+    if (res.ok) return { connected: true, tableExists: true, status: 'active' };
+
+    const body = await res.json().catch(() => ({}));
+    const msg  = (body?.message || body?.error || '').toLowerCase();
+
+    // Tabela não encontrada (inclui schema cache miss)
+    if (isTableNotFoundError(res.status, body)) {
+      return { connected: true, tableExists: false, status: 'setup_required' };
+    }
+
+    // Projeto pausado
+    if (res.status === 503 || msg.includes('paused') || msg.includes('inactive')) {
+      return { connected: false, tableExists: false, status: 'paused', error: 'Projeto pausado pelo Supabase' };
+    }
+
+    return { connected: false, tableExists: false, status: 'error', error: `HTTP ${res.status}: ${body?.message || ''}` };
+
+  } catch (err) {
+    const msg = err.message || 'Timeout ou sem resposta';
+    const isPaused = msg.includes('ECONNREFUSED') || msg.includes('ETIMEDOUT');
+    return { connected: false, tableExists: false, status: isPaused ? 'paused' : 'error', error: msg };
+  }
+}
+
+async function pingProject(project) {
+  const { id, url, anonKey, serviceRoleKey, name } = project;
+  const key = serviceRoleKey || anonKey;
+
+  try {
+    const res = await fetch(`${url}/rest/v1/_revisoes`, {
+      method: 'POST',
+      headers: {
+        'apikey': key,
+        'Authorization': `Bearer ${key}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=minimal'
+      },
+      body: JSON.stringify({ source: 'anti-pausa-supabase' }),
+      signal: AbortSignal.timeout(15000)
+    });
+
+    const projects = loadProjects();
+    const idx = projects.findIndex(p => p.id === id);
+
+    if (res.ok || res.status === 201) {
+      if (idx !== -1) {
+        projects[idx].lastPing  = new Date().toISOString();
+        projects[idx].pingCount = (projects[idx].pingCount || 0) + 1;
+        projects[idx].status    = 'active';
+        projects[idx].lastError = null;
+        saveProjects(projects);
+      }
+      addLog(id, 'success', `Ping OK • ${name}`);
+      return { success: true };
+    }
+
+    const body = await res.json().catch(() => ({}));
+    const errMsg = body?.message || `HTTP ${res.status}`;
+
+    // Schema cache miss → tabela existe mas cache ainda não atualizou
+    let newStatus;
+    if (isTableNotFoundError(res.status, body)) {
+      newStatus = 'setup_required';
+    } else if (res.status === 503) {
+      newStatus = 'paused';
+    } else {
+      newStatus = 'error';
+    }
+
+    if (idx !== -1) {
+      projects[idx].lastError = errMsg;
+      projects[idx].status    = newStatus;
+      saveProjects(projects);
+    }
+    addLog(id, 'error', `Ping falhou • ${name}: ${errMsg}`, { status: res.status });
+    return { success: false, error: errMsg, status: newStatus };
+
+  } catch (err) {
+    const projects = loadProjects();
+    const idx = projects.findIndex(p => p.id === id);
+    if (idx !== -1) { projects[idx].lastError = err.message; projects[idx].status = 'error'; saveProjects(projects); }
+    addLog(id, 'error', `Ping falhou • ${name}: ${err.message}`);
+    return { success: false, error: err.message };
+  }
+}
+
+async function createTableWithPAT(project) {
+  const ref = project.projectRef || extractProjectRef(project.url);
+  const pat = project.personalAccessToken;
+  if (!ref || !pat) return { success: false, error: 'PAT ou ref não encontrados' };
+
+  const sql = `
+    CREATE TABLE IF NOT EXISTS _revisoes (
+      id BIGSERIAL PRIMARY KEY,
+      pinged_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      source TEXT NOT NULL DEFAULT 'anti-pausa-supabase'
+    );
+    ALTER TABLE _revisoes ENABLE ROW LEVEL SECURITY;
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = '_revisoes' AND policyname = 'allow_anon_insert') THEN
+        EXECUTE 'CREATE POLICY allow_anon_insert ON _revisoes FOR INSERT TO anon WITH CHECK (true)';
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = '_revisoes' AND policyname = 'allow_anon_select') THEN
+        EXECUTE 'CREATE POLICY allow_anon_select ON _revisoes FOR SELECT TO anon USING (true)';
+      END IF;
+    END $$;
+    -- Força o PostgREST a recarregar o cache de schema imediatamente
+    NOTIFY pgrst, 'reload schema';
+  `;
+
+  try {
+    const res = await fetch(`https://api.supabase.com/v1/projects/${ref}/database/query`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${pat}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: sql }),
+      signal: AbortSignal.timeout(20000)
+    });
+
+    if (res.ok) {
+      // Aguarda 4 segundos para o PostgREST processar o NOTIFY e atualizar o cache
+      await new Promise(resolve => setTimeout(resolve, 4000));
+      return { success: true };
+    }
+
+    const body = await res.json().catch(() => ({}));
+    return { success: false, error: body?.message || `HTTP ${res.status}` };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+
+// ─── Auth Middleware ──────────────────────────────────────────────────────────────
+const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || '';
+const validTokens = new Set(); // tokens válidos em memória (reset no restart)
+
+function generateToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+// Verifica se a requisição tem um token válido
+function isAuthenticated(req) {
+  if (!DASHBOARD_PASSWORD) return true; // sem senha configurada = livre
+  const authHeader = req.headers['authorization'] || '';
+  const token = authHeader.replace('Bearer ', '').trim()
+             || req.headers['x-auth-token']
+             || req.query.token
+             || '';
+  return validTokens.has(token);
+}
+
+function requireAuth(req, res, next) {
+  if (isAuthenticated(req)) return next();
+  res.status(401).json({ error: 'Não autenticado', requireAuth: true });
+}
+
+// Login
+app.post('/api/auth/login', (req, res) => {
+  const { password } = req.body;
+  if (!DASHBOARD_PASSWORD) return res.json({ success: true, token: null, noAuth: true });
+  if (password !== DASHBOARD_PASSWORD) {
+    return res.status(401).json({ error: 'Senha incorreta' });
+  }
+  const token = generateToken();
+  validTokens.add(token);
+  // Expira em 30 dias
+  setTimeout(() => validTokens.delete(token), 30 * 24 * 3600 * 1000);
+  res.json({ success: true, token });
+});
+
+// Check auth status
+app.get('/api/auth/check', (req, res) => {
+  res.json({
+    authenticated: isAuthenticated(req),
+    passwordRequired: !!DASHBOARD_PASSWORD
+  });
+});
+
+// Logout
+app.post('/api/auth/logout', (req, res) => {
+  const authHeader = req.headers['authorization'] || '';
+  const token = authHeader.replace('Bearer ', '').trim();
+  validTokens.delete(token);
+  res.json({ success: true });
+});
+
+// ─── API Routes ──────────────────────────────────────────────────────────────
+// Todas as rotas /api/* (exceto auth) requerem autenticação
+app.use('/api', (req, res, next) => {
+  if (req.path.startsWith('/auth/')) return next(); // rotas de auth são livres
+  requireAuth(req, res, next);
+});
+
+// Test connection before adding
+app.post('/api/projects/test', async (req, res) => {
+  const { url, anonKey, serviceRoleKey } = req.body;
+  if (!url || !anonKey) return res.status(400).json({ error: 'URL e Anon Key são obrigatórios' });
+
+  const jwt = decodeJWT(anonKey);
+  const ref = jwt?.ref || extractProjectRef(url);
+  const result = await testConnection({ url, anonKey, serviceRoleKey });
+
+  res.json({ ...result, projectRef: ref, keyInfo: jwt ? { role: jwt.role, ref: jwt.ref, exp: jwt.exp } : null });
+});
+
+// List all projects (keys masked)
+app.get('/api/projects', (req, res) => {
+  const projects = loadProjects().map(p => ({
+    ...p,
+    anonKey: p.anonKey ? `${p.anonKey.substring(0, 12)}...` : null,
+    serviceRoleKey: p.serviceRoleKey ? '[SET]' : null,
+    personalAccessToken: p.personalAccessToken ? '[SET]' : null
+  }));
+  res.json(projects);
+});
+
+// Add project
+app.post('/api/projects', async (req, res) => {
+  const { name, url, anonKey, serviceRoleKey, personalAccessToken } = req.body;
+  if (!name || !url || !anonKey) return res.status(400).json({ error: 'Nome, URL e Anon Key são obrigatórios' });
+
+  const projects = loadProjects();
+  if (projects.find(p => p.url.trim() === url.trim())) return res.status(400).json({ error: 'Já existe um projeto com esta URL' });
+
+  const jwt = decodeJWT(anonKey);
+  const project = {
+    id: `proj_${Date.now()}`,
+    name,
+    url: url.replace(/\/$/, ''),
+    anonKey,
+    serviceRoleKey: serviceRoleKey || null,
+    personalAccessToken: personalAccessToken || null,
+    projectRef: jwt?.ref || extractProjectRef(url),
+    status: 'checking',
+    tableExists: false,
+    connected: false,
+    lastPing: null,
+    pingCount: 0,
+    lastError: null,
+    enabled: true,
+    createdAt: new Date().toISOString()
+  };
+
+  projects.push(project);
+  saveProjects(projects);
+  addLog(project.id, 'info', `Projeto "${name}" adicionado`);
+
+  // Test + auto-setup async
+  (async () => {
+    const result = await testConnection(project);
+    const projs = loadProjects();
+    const idx   = projs.findIndex(p => p.id === project.id);
+    if (idx === -1) return;
+
+    projs[idx] = { ...projs[idx], ...result };
+
+    if (!result.tableExists && personalAccessToken) {
+      const setup = await createTableWithPAT(projs[idx]);
+      if (setup.success) {
+        projs[idx].status     = 'active';
+        projs[idx].tableExists = true;
+        addLog(project.id, 'success', `Tabela _revisoes criada automaticamente`);
+        saveProjects(projs);
+        await pingProject(projs[idx]);
+        return;
+      } else {
+        addLog(project.id, 'warning', `Auto-setup falhou: ${setup.error}. Execute o SQL manualmente.`);
+      }
+    }
+
+    saveProjects(projs);
+    addLog(project.id, result.connected ? 'success' : 'error',
+      result.connected ? `Conectado! Status: ${result.status}` : `Falha de conexão: ${result.error}`);
+  })();
+
+  res.json({
+    ...project,
+    anonKey: `${anonKey.substring(0, 12)}...`,
+    serviceRoleKey: serviceRoleKey ? '[SET]' : null,
+    personalAccessToken: personalAccessToken ? '[SET]' : null
+  });
+});
+
+// Delete project
+app.delete('/api/projects/:id', (req, res) => {
+  const projects = loadProjects();
+  const proj = projects.find(p => p.id === req.params.id);
+  saveProjects(projects.filter(p => p.id !== req.params.id));
+  if (proj) addLog(proj.id, 'info', `Projeto "${proj.name}" removido`);
+  res.json({ success: true });
+});
+
+// Update (enable/disable/rename)
+app.patch('/api/projects/:id', (req, res) => {
+  const projects = loadProjects();
+  const idx = projects.findIndex(p => p.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Projeto não encontrado' });
+  const { enabled, name } = req.body;
+  if (typeof enabled !== 'undefined') projects[idx].enabled = enabled;
+  if (name) projects[idx].name = name;
+  saveProjects(projects);
+  res.json({ success: true });
+});
+
+// Manual ping
+app.post('/api/projects/:id/ping', async (req, res) => {
+  const project = loadProjects().find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: 'Projeto não encontrado' });
+  const result = await pingProject(project);
+  res.json(result);
+});
+
+// Get setup SQL or auto-create
+app.post('/api/projects/:id/setup', async (req, res) => {
+  const project = loadProjects().find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: 'Projeto não encontrado' });
+
+  if (project.personalAccessToken) {
+    const result = await createTableWithPAT(project);
+    if (result.success) {
+      const projs = loadProjects();
+      const idx   = projs.findIndex(p => p.id === project.id);
+      if (idx !== -1) { projs[idx].status = 'active'; projs[idx].tableExists = true; saveProjects(projs); }
+      addLog(project.id, 'success', `Tabela _revisoes criada com PAT`);
+      await pingProject(loadProjects().find(p => p.id === project.id));
+      return res.json({ success: true, autoCreated: true });
+    }
+    return res.json({ success: false, autoCreated: false, error: result.error, sql: buildSetupSQL(project.name) });
+  }
+
+  res.json({ success: false, requiresManualSetup: true, sql: buildSetupSQL(project.name) });
+});
+
+// Confirm manual SQL was executed
+app.post('/api/projects/:id/confirm-setup', async (req, res) => {
+  const projects = loadProjects();
+  const idx = projects.findIndex(p => p.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Projeto não encontrado' });
+
+  // Se tem PAT, envia NOTIFY para recarregar o schema cache antes de testar
+  if (projects[idx].personalAccessToken) {
+    const ref = projects[idx].projectRef || extractProjectRef(projects[idx].url);
+    if (ref) {
+      await fetch(`https://api.supabase.com/v1/projects/${ref}/database/query`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${projects[idx].personalAccessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: `NOTIFY pgrst, 'reload schema';` }),
+        signal: AbortSignal.timeout(10000)
+      }).catch(() => {});
+      // Aguarda o PostgREST processar
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    }
+  }
+
+  const result = await testConnection(projects[idx]);
+  if (result.tableExists) {
+    projects[idx].status     = 'active';
+    projects[idx].tableExists = true;
+    projects[idx].connected   = true;
+    saveProjects(projects);
+    addLog(projects[idx].id, 'success', `Setup confirmado para "${projects[idx].name}"`);
+    await pingProject(projects[idx]);
+    return res.json({ success: true });
+  }
+  res.json({ success: false, error: 'Tabela ainda não encontrada. Verifique se o SQL foi executado.' });
+});
+
+
+// Refresh project status
+app.post('/api/projects/:id/refresh', async (req, res) => {
+  const projects = loadProjects();
+  const idx = projects.findIndex(p => p.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Projeto não encontrado' });
+
+  const result = await testConnection(projects[idx]);
+  projects[idx] = { ...projects[idx], ...result };
+  saveProjects(projects);
+  res.json({ success: true, ...result });
+});
+
+// Pinga TODOS os projetos agora (ignora status, só respeita enabled)
+app.post('/api/ping-all', async (req, res) => {
+  const projects = loadProjects().filter(p => p.enabled !== false);
+  if (!projects.length) return res.json({ results: [], pinged: 0 });
+
+  res.json({ started: true, count: projects.length });
+
+  // Executa em background
+  (async () => {
+    for (const project of projects) {
+      // Se tem PAT e o status é setup_required ou checking, tenta criar/reativar tabela
+      if (project.personalAccessToken && (project.status === 'setup_required' || project.status === 'checking' || project.status === 'error')) {
+        const ref = project.projectRef || extractProjectRef(project.url);
+        if (ref) {
+          console.log(`[PING-ALL] Recarregando schema cache de ${project.name}...`);
+          await fetch(`https://api.supabase.com/v1/projects/${ref}/database/query`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${project.personalAccessToken}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: `NOTIFY pgrst, 'reload schema';` }),
+            signal: AbortSignal.timeout(10000)
+          }).catch(() => {});
+          await new Promise(resolve => setTimeout(resolve, 3000));
+
+          // Testa se a tabela agora existe
+          const connResult = await testConnection(project);
+          if (!connResult.tableExists) {
+            // Não existe de fato — cria
+            const setup = await createTableWithPAT({ ...project });
+            if (setup.success) {
+              const ps = loadProjects();
+              const idx = ps.findIndex(p => p.id === project.id);
+              if (idx !== -1) { ps[idx].status = 'active'; ps[idx].tableExists = true; saveProjects(ps); }
+              addLog(project.id, 'success', `Tabela criada e pronta • ${project.name}`);
+              // Usa a versão atualizada do project
+              await pingProject(loadProjects().find(p => p.id === project.id) || project);
+              continue;
+            }
+          }
+        }
+      }
+
+      console.log(`[PING-ALL] Pingando ${project.name}...`);
+      await pingProject(project);
+    }
+  })();
+});
+
+// Logs
+app.get('/api/logs', (req, res) => {
+  const { projectId, limit = 100 } = req.query;
+  let logs = loadLogs();
+  if (projectId) logs = logs.filter(l => l.projectId === projectId);
+  res.json(logs.slice(0, parseInt(limit)));
+});
+
+// Overall status
+app.get('/api/status', (req, res) => {
+  const projects = loadProjects();
+  const active      = projects.filter(p => p.status === 'active' && p.enabled).length;
+  const setupReq    = projects.filter(p => p.status === 'setup_required').length;
+  const paused      = projects.filter(p => p.status === 'paused').length;
+  const total       = projects.length;
+
+  const nextPingProject = projects
+    .filter(p => p.status === 'active' && p.enabled && p.lastPing)
+    .sort((a, b) => new Date(a.lastPing) - new Date(b.lastPing))[0];
+
+  let nextPingMs = null;
+  if (nextPingProject) {
+    const next = new Date(nextPingProject.lastPing).getTime() + 47 * 3600 * 1000;
+    nextPingMs = Math.max(0, next - Date.now());
+  }
+
+  res.json({ active, total, setupReq, paused, nextPingMs, uptime: process.uptime() });
+});
+
+// ─── PAT Discovery (lista projetos via Management API) ───────────────────────
+async function fetchAllProjectsFromPAT(pat) {
+  // 1. Lista todos os projetos da conta
+  const projRes = await fetch('https://api.supabase.com/v1/projects', {
+    headers: { 'Authorization': `Bearer ${pat}` },
+    signal: AbortSignal.timeout(15000)
+  });
+
+  if (!projRes.ok) {
+    const body = await projRes.json().catch(() => ({}));
+    throw new Error(body?.message || `Erro ${projRes.status} ao listar projetos`);
+  }
+
+  const allProjects = await projRes.json();  // array de projetos
+
+  // 2. Para cada projeto, busca as API keys
+  const enriched = await Promise.all(allProjects.map(async (proj) => {
+    try {
+      const keyRes = await fetch(`https://api.supabase.com/v1/projects/${proj.ref}/api-keys`, {
+        headers: { 'Authorization': `Bearer ${pat}` },
+        signal: AbortSignal.timeout(10000)
+      });
+
+      let anonKey = null;
+      let serviceRoleKey = null;
+
+      if (keyRes.ok) {
+        const keys = await keyRes.json();
+        // Prefere publishable, depois anon (legacy)
+        const anonEntry = keys.find(k => k.name === 'default' && k.type === 'publishable')
+                       || keys.find(k => k.name === 'anon');
+        const svcEntry  = keys.find(k => k.name === 'service_role');
+        anonKey        = anonEntry?.api_key || null;
+        serviceRoleKey = svcEntry?.api_key  || null;
+      }
+
+      return {
+        ref:           proj.ref,
+        name:          proj.name,
+        status:        proj.status,         // ACTIVE_HEALTHY | INACTIVE | PAUSED_ACTIVE
+        region:        proj.region,
+        orgId:         proj.organization_id,
+        url:           `https://${proj.ref}.supabase.co`,
+        anonKey,
+        serviceRoleKey,
+        createdAt:     proj.created_at
+      };
+    } catch (err) {
+      return {
+        ref:    proj.ref,
+        name:   proj.name,
+        status: proj.status,
+        url:    `https://${proj.ref}.supabase.co`,
+        anonKey: null,
+        serviceRoleKey: null,
+        error:  err.message
+      };
+    }
+  }));
+
+  return enriched;
+}
+
+// Descobre projetos via PAT (sem adicionar ainda)
+app.post('/api/discover', async (req, res) => {
+  const { pat } = req.body;
+  if (!pat) return res.status(400).json({ error: 'Personal Access Token é obrigatório' });
+
+  try {
+    const discovered = await fetchAllProjectsFromPAT(pat);
+    const existing   = loadProjects().map(p => p.projectRef || extractProjectRef(p.url));
+
+    const result = discovered.map(d => ({
+      ...d,
+      alreadyAdded: existing.includes(d.ref),
+      // Nunca expõe keys reais na listagem
+      anonKeyPreview:        d.anonKey        ? `${d.anonKey.substring(0,12)}...`        : null,
+      serviceRoleKeyPreview: d.serviceRoleKey ? `${d.serviceRoleKey.substring(0,12)}...` : null,
+      hasAnonKey:        !!d.anonKey,
+      hasServiceRoleKey: !!d.serviceRoleKey
+    }));
+
+    res.json({ projects: result, count: result.length });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Importa projetos selecionados via PAT (cria tabela automaticamente)
+app.post('/api/import', async (req, res) => {
+  const { pat, refs } = req.body;   // refs = array de project refs para importar
+  if (!pat || !refs?.length) return res.status(400).json({ error: 'PAT e refs são obrigatórios' });
+
+  try {
+    const discovered = await fetchAllProjectsFromPAT(pat);
+    const toImport   = discovered.filter(d => refs.includes(d.ref));
+    const existing   = loadProjects();
+    const results    = [];
+
+    for (const d of toImport) {
+      // Pula se já existe
+      if (existing.find(p => (p.projectRef || extractProjectRef(p.url)) === d.ref)) {
+        results.push({ ref: d.ref, name: d.name, status: 'skipped', reason: 'Já adicionado' });
+        continue;
+      }
+
+      if (!d.anonKey) {
+        results.push({ ref: d.ref, name: d.name, status: 'error', reason: 'Anon Key não encontrada' });
+        continue;
+      }
+
+      const project = {
+        id:                   `proj_${Date.now()}_${d.ref}`,
+        name:                 d.name,
+        url:                  d.url,
+        anonKey:              d.anonKey,
+        serviceRoleKey:       d.serviceRoleKey || null,
+        personalAccessToken:  pat,
+        projectRef:           d.ref,
+        organization:         d.orgId,
+        region:               d.region,
+        status:               'checking',
+        tableExists:          false,
+        connected:            false,
+        lastPing:             null,
+        pingCount:            0,
+        lastError:            null,
+        enabled:              true,
+        importedViaPAT:       true,
+        createdAt:            new Date().toISOString()
+      };
+
+      const projs = loadProjects();
+      projs.push(project);
+      saveProjects(projs);
+      addLog(project.id, 'info', `Projeto "${d.name}" importado via PAT`);
+
+      // Cria tabela + pinga (async)
+      (async () => {
+        const connResult = await testConnection(project);
+        const ps  = loadProjects();
+        const idx = ps.findIndex(p => p.id === project.id);
+        if (idx === -1) return;
+        ps[idx] = { ...ps[idx], ...connResult };
+
+        if (!connResult.tableExists) {
+          const setup = await createTableWithPAT(ps[idx]);
+          if (setup.success) {
+            ps[idx].status     = 'active';
+            ps[idx].tableExists = true;
+            addLog(project.id, 'success', `Tabela _revisoes criada para "${d.name}"`);
+            saveProjects(ps);
+            await pingProject(ps[idx]);
+            return;
+          } else {
+            addLog(project.id, 'warning', `Não foi possível criar tabela para "${d.name}": ${setup.error}`);
+          }
+        }
+        saveProjects(ps);
+      })();
+
+      results.push({ ref: d.ref, name: d.name, status: 'imported' });
+    }
+
+    res.json({ results, imported: results.filter(r => r.status === 'imported').length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Scheduler ──────────────────────────────────────────────────────────────
+async function runScheduledPings() {
+  const projects = loadProjects();
+  const now = Date.now();
+
+  for (const project of projects) {
+    if (!project.enabled) continue;
+
+    // Projetos travados em 'checking' ou 'error' há mais de 5 minutos: tenta recuperar
+    if (project.status === 'checking' || project.status === 'error') {
+      const age = (now - new Date(project.createdAt || 0).getTime()) / 60000;
+      if (age > 5) {
+        console.log(`[SCHED] Recuperando projeto travado: ${project.name} (status: ${project.status})`);
+        const connResult = await testConnection(project);
+        const ps  = loadProjects();
+        const idx = ps.findIndex(p => p.id === project.id);
+        if (idx !== -1) { ps[idx] = { ...ps[idx], ...connResult }; saveProjects(ps); }
+        continue;
+      }
+    }
+
+    // Projetos ativos: pinga se passou 47h
+    if (project.status !== 'setup_required' && project.status !== 'paused') {
+      const lastPing = project.lastPing ? new Date(project.lastPing).getTime() : 0;
+      const hoursAgo = (now - lastPing) / 3600000;
+      if (hoursAgo >= 47) {
+        console.log(`[SCHED] Pingando ${project.name}...`);
+        await pingProject(project);
+      }
+    }
+  }
+}
+
+// Roda a cada hora
+cron.schedule('0 * * * *', () => {
+  console.log(`[CRON] ${new Date().toISOString()} Rodando checks agendados...`);
+  runScheduledPings();
+});
+
+// ─── Start ────────────────────────────────────────────────────────────────────
+app.listen(PORT, () => {
+  console.log(`\n🟢 Anti-Pausa Supabase rodando em http://localhost:${PORT}`);
+  console.log(`📊 Abrindo dashboard...\n`);
+
+  // Initial check on startup
+  setTimeout(async () => {
+    const projects = loadProjects();
+    for (const project of projects) {
+      if (!project.enabled || project.status === 'setup_required') continue;
+      const lastPing = project.lastPing ? new Date(project.lastPing).getTime() : 0;
+      if ((Date.now() - lastPing) / 3600000 >= 47) {
+        console.log(`[STARTUP] Pingando ${project.name}...`);
+        await pingProject(project);
+      }
+    }
+  }, 3000);
+});
