@@ -435,7 +435,36 @@ app.post('/api/auth/logout', (req, res) => {
 });
 
 // ─── API Routes ──────────────────────────────────────────────────────────────
-// Todas // Add project
+// Todas as rotas /api/* (exceto auth) requerem autenticação
+app.use('/api', (req, res, next) => {
+  if (req.path.startsWith('/auth/')) return next(); // rotas de auth são livres
+  requireAuth(req, res, next);
+});
+
+// Test connection before adding
+app.post('/api/projects/test', async (req, res) => {
+  const { url, anonKey, serviceRoleKey } = req.body;
+  if (!url || !anonKey) return res.status(400).json({ error: 'URL e Anon Key são obrigatórios' });
+
+  const jwt = decodeJWT(anonKey);
+  const ref = jwt?.ref || extractProjectRef(url);
+  const result = await testConnection({ url, anonKey, serviceRoleKey });
+
+  res.json({ ...result, projectRef: ref, keyInfo: jwt ? { role: jwt.role, ref: jwt.ref, exp: jwt.exp } : null });
+});
+
+// List all projects (keys masked)
+app.get('/api/projects', (req, res) => {
+  const projects = loadProjects().map(p => ({
+    ...p,
+    anonKey: p.anonKey ? `${p.anonKey.substring(0, 12)}...` : null,
+    serviceRoleKey: p.serviceRoleKey ? '[SET]' : null,
+    personalAccessToken: p.personalAccessToken ? '[SET]' : null
+  }));
+  res.json(projects);
+});
+
+// Add project
 app.post('/api/projects', async (req, res) => {
   const { name, url, anonKey, serviceRoleKey, personalAccessToken } = req.body;
   if (!name || !url || !anonKey) return res.status(400).json({ error: 'Nome, URL e Anon Key são obrigatórios' });
