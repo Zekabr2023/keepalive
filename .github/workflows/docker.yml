@@ -31,3 +31,10 @@ jobs:
           tags: |
             ghcr.io/zekabr2023/keepalive:latest
             ghcr.io/zekabr2023/keepalive:${{ github.sha }}
+
+      - name: Trigger Portainer redeploy
+        run: |
+          echo "Notificando Portainer para atualizar o serviço..."
+          curl -s -o /dev/null -w "HTTP %{http_code}" \
+            -X POST "https://nef-portainer.automabo.com.br/api/webhooks/8590051b-147c-4282-b745-8dc43af9ae2a"
+          echo " — redeploy disparado!"
