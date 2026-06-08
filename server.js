@@ -8,9 +8,86 @@ const crypto  = require('crypto');
 const app  = express();
 const PORT = process.env.PORT || 3131;
 
-app.use(cors());
-app.use(express.json());
+// ─── Security Headers ──────────────────────────────────────────────────────────────
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' https://fonts.googleapis.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'");
+  next();
+});
+
+app.use(cors({ origin: false })); // sem CORS público
+app.use(express.json({ limit: '50kb' })); // limita payload
 app.use(express.static(path.join(__dirname, 'public')));
+
+// ─── Encryption (AES-256-GCM) ───────────────────────────────────────────────────────
+const KEY_FILE = path.join(__dirname, 'data', '.enc_key');
+let ENC_KEY;  // Buffer de 32 bytes
+
+function initEncryptionKey() {
+  const envKey = process.env.ENCRYPTION_KEY;
+  if (envKey && envKey.length === 64) {
+    ENC_KEY = Buffer.from(envKey, 'hex');
+    return;
+  }
+  // Gera e persiste uma chave aleatória se não configurada
+  if (!fs.existsSync(path.dirname(KEY_FILE))) fs.mkdirSync(path.dirname(KEY_FILE), { recursive: true });
+  if (fs.existsSync(KEY_FILE)) {
+    ENC_KEY = Buffer.from(fs.readFileSync(KEY_FILE, 'utf8').trim(), 'hex');
+  } else {
+    ENC_KEY = crypto.randomBytes(32);
+    fs.writeFileSync(KEY_FILE, ENC_KEY.toString('hex'), { mode: 0o600 });
+    console.log('[SECURITY] Chave de criptografia gerada e salva em', KEY_FILE);
+  }
+}
+initEncryptionKey();
+
+const ENC_PREFIX = 'enc1:';
+
+function encryptField(plaintext) {
+  if (!plaintext || typeof plaintext !== 'string') return plaintext;
+  if (plaintext.startsWith(ENC_PREFIX)) return plaintext; // já criptografado
+  try {
+    const iv      = crypto.randomBytes(12);  // 96-bit IV para GCM
+    const cipher  = crypto.createCipheriv('aes-256-gcm', ENC_KEY, iv);
+    const enc     = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+    return ENC_PREFIX + iv.toString('hex') + ':' + authTag.toString('hex') + ':' + enc.toString('hex');
+  } catch { return plaintext; }
+}
+
+function decryptField(value) {
+  if (!value || typeof value !== 'string') return value;
+  if (!value.startsWith(ENC_PREFIX)) return value; // plain text legado
+  try {
+    const parts   = value.slice(ENC_PREFIX.length).split(':');
+    if (parts.length !== 3) return value;
+    const iv      = Buffer.from(parts[0], 'hex');
+    const authTag = Buffer.from(parts[1], 'hex');
+    const enc     = Buffer.from(parts[2], 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', ENC_KEY, iv);
+    decipher.setAuthTag(authTag);
+    return decipher.update(enc) + decipher.final('utf8');
+  } catch { return null; } // corruptos/inválidos retornam null
+}
+
+// Campos sensíveis que devem ser criptografados
+const SENSITIVE_FIELDS = ['personalAccessToken', 'serviceRoleKey', 'anonKey'];
+
+function encryptProject(p) {
+  const out = { ...p };
+  for (const f of SENSITIVE_FIELDS) if (out[f]) out[f] = encryptField(out[f]);
+  return out;
+}
+
+function decryptProject(p) {
+  const out = { ...p };
+  for (const f of SENSITIVE_FIELDS) if (out[f]) out[f] = decryptField(out[f]);
+  return out;
+}
 
 // ─── Data Layer ─────────────────────────────────────────────────────────────
 const DATA_DIR = path.join(__dirname, 'data');
@@ -21,9 +98,15 @@ const LOGS_FILE     = path.join(DATA_DIR, 'logs.json');
 
 function loadProjects() {
   if (!fs.existsSync(PROJECTS_FILE)) return [];
-  try { return JSON.parse(fs.readFileSync(PROJECTS_FILE, 'utf8')); } catch { return []; }
+  try {
+    const raw = JSON.parse(fs.readFileSync(PROJECTS_FILE, 'utf8'));
+    return raw.map(decryptProject);
+  } catch { return []; }
 }
-function saveProjects(p) { fs.writeFileSync(PROJECTS_FILE, JSON.stringify(p, null, 2)); }
+function saveProjects(projects) {
+  const encrypted = projects.map(encryptProject);
+  fs.writeFileSync(PROJECTS_FILE, JSON.stringify(encrypted, null, 2));
+}
 
 function loadLogs() {
   if (!fs.existsSync(LOGS_FILE)) return [];
@@ -241,43 +324,76 @@ async function createTableWithPAT(project) {
 }
 
 
-// ─── Auth Middleware ──────────────────────────────────────────────────────────────
+// \u2500\u2500\u2500 Auth Middleware \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || '';
-const validTokens = new Set(); // tokens válidos em memória (reset no restart)
+// Tokens: Map<token, expiresAt>
+const validTokens = new Map();
+
+// Rate limiting em mem\u00f3ria: Map<ip, {count, resetAt}>
+const loginAttempts = new Map();
+const MAX_ATTEMPTS  = 10;
+const WINDOW_MS     = 15 * 60 * 1000; // 15 minutos
+
+function checkRateLimit(ip) {
+  const now   = Date.now();
+  const entry = loginAttempts.get(ip) || { count: 0, resetAt: now + WINDOW_MS };
+  if (now > entry.resetAt) { entry.count = 0; entry.resetAt = now + WINDOW_MS; }
+  entry.count++;
+  loginAttempts.set(ip, entry);
+  return entry.count > MAX_ATTEMPTS;
+}
 
 function generateToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 
-// Verifica se a requisição tem um token válido
+function timingSafePasswordCheck(input, expected) {
+  // Compara\u00e7\u00e3o em tempo constante para prevenir timing attacks
+  const a = Buffer.alloc(64, 0); const b = Buffer.alloc(64, 0);
+  Buffer.from(input.slice(0, 64)).copy(a);
+  Buffer.from(expected.slice(0, 64)).copy(b);
+  return crypto.timingSafeEqual(a, b) && input === expected;
+}
+
 function isAuthenticated(req) {
-  if (!DASHBOARD_PASSWORD) return true; // sem senha configurada = livre
+  if (!DASHBOARD_PASSWORD) return true;
   const authHeader = req.headers['authorization'] || '';
   const token = authHeader.replace('Bearer ', '').trim()
              || req.headers['x-auth-token']
-             || req.query.token
              || '';
-  return validTokens.has(token);
+  const expiresAt = validTokens.get(token);
+  if (!expiresAt || Date.now() > expiresAt) {
+    if (expiresAt) validTokens.delete(token); // limpa expirado
+    return false;
+  }
+  return true;
 }
 
 function requireAuth(req, res, next) {
   if (isAuthenticated(req)) return next();
-  res.status(401).json({ error: 'Não autenticado', requireAuth: true });
+  res.status(401).json({ error: 'N\u00e3o autenticado', requireAuth: true });
 }
 
-// Login
+// Login com rate limiting e timing-safe
 app.post('/api/auth/login', (req, res) => {
-  const { password } = req.body;
-  if (!DASHBOARD_PASSWORD) return res.json({ success: true, token: null, noAuth: true });
-  if (password !== DASHBOARD_PASSWORD) {
-    return res.status(401).json({ error: 'Senha incorreta' });
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  if (checkRateLimit(ip)) {
+    return res.status(429).json({ error: 'Muitas tentativas. Tente em 15 minutos.' });
   }
-  const token = generateToken();
-  validTokens.add(token);
-  // Expira em 30 dias
-  setTimeout(() => validTokens.delete(token), 30 * 24 * 3600 * 1000);
+
+  const { password } = req.body || {};
+  if (!DASHBOARD_PASSWORD) return res.json({ success: true, token: null, noAuth: true });
+  if (!password || !timingSafePasswordCheck(String(password), DASHBOARD_PASSWORD)) {
+    // Delay artificial para dificultar enumera\u00e7\u00e3o
+    return setTimeout(() => res.status(401).json({ error: 'Senha incorreta' }), 400);
+  }
+
+  const token     = generateToken();
+  const expiresAt = Date.now() + 30 * 24 * 3600 * 1000; // 30 dias
+  validTokens.set(token, expiresAt);
   res.json({ success: true, token });
 });
+
 
 // Check auth status
 app.get('/api/auth/check', (req, res) => {

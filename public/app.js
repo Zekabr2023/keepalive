@@ -51,7 +51,7 @@ async function handleLogin(event) {
   err.style.display = 'none';
 
   try {
-    const res  = await fetch(`${API}/api/auth/login`, {
+    const res  = await apiFetch(`${API}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password: pw })
@@ -78,7 +78,7 @@ async function handleLogin(event) {
 
 async function logout() {
   if (authToken) {
-    await fetch(`${API}/api/auth/logout`, {
+    await apiFetch(`${API}/api/auth/logout`, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${authToken}` }
     }).catch(() => {});
@@ -92,7 +92,7 @@ async function logout() {
 document.addEventListener('DOMContentLoaded', async () => {
   // Check auth status first
   try {
-    const res  = await fetch(`${API}/api/auth/check`,
+    const res  = await apiFetch(`${API}/api/auth/check`,
       authToken ? { headers: { 'Authorization': `Bearer ${authToken}` } } : {}
     );
     const data = await res.json();
@@ -130,8 +130,8 @@ function showSection(name) {
 async function loadDashboard() {
   try {
     const [projRes, statusRes] = await Promise.all([
-      fetch(`${API}/api/projects`),
-      fetch(`${API}/api/status`)
+      apiFetch(`${API}/api/projects`),
+      apiFetch(`${API}/api/status`)
     ]);
     projects = await projRes.json();
     const status = await statusRes.json();
@@ -271,7 +271,7 @@ function buildCardHTML(p) {
 // ─── Sidebar Stats ────────────────────────────────────────────────
 async function loadSideStats() {
   try {
-    const res    = await fetch(`${API}/api/status`);
+    const res    = await apiFetch(`${API}/api/status`);
     const status = await res.json();
     updateSideStats(status);
   } catch {}
@@ -322,7 +322,7 @@ async function manualPing(id) {
   if (card) card.classList.add('pinging');
 
   try {
-    const res  = await fetch(`${API}/api/projects/${id}/ping`, { method: 'POST' });
+    const res  = await apiFetch(`${API}/api/projects/${id}/ping`, { method: 'POST' });
     const data = await res.json();
     if (data.success) {
       toast('Ping realizado com sucesso! ✅', 'success');
@@ -339,7 +339,7 @@ async function manualPing(id) {
 
 async function toggleProject(id, currentEnabled) {
   try {
-    await fetch(`${API}/api/projects/${id}`, {
+    await apiFetch(`${API}/api/projects/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: !currentEnabled })
@@ -354,7 +354,7 @@ async function toggleProject(id, currentEnabled) {
 async function deleteProject(id, name) {
   if (!confirm(`Remover o projeto "${name}"? Esta ação não pode ser desfeita.`)) return;
   try {
-    await fetch(`${API}/api/projects/${id}`, { method: 'DELETE' });
+    await apiFetch(`${API}/api/projects/${id}`, { method: 'DELETE' });
     toast(`Projeto "${name}" removido`, 'info');
     await loadDashboard();
   } catch (err) {
@@ -364,7 +364,7 @@ async function deleteProject(id, name) {
 
 async function refreshProject(id) {
   try {
-    const res  = await fetch(`${API}/api/projects/${id}/refresh`, { method: 'POST' });
+    const res  = await apiFetch(`${API}/api/projects/${id}/refresh`, { method: 'POST' });
     const data = await res.json();
     toast(`Status atualizado: ${data.status}`, data.connected ? 'success' : 'warning');
     await loadDashboard();
@@ -386,7 +386,7 @@ async function pingAll() {
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Pingando...'; }
 
   try {
-    const res  = await fetch(`${API}/api/ping-all`, { method: 'POST' });
+    const res  = await apiFetch(`${API}/api/ping-all`, { method: 'POST' });
     const data = await res.json();
     if (data.started) {
       toast(`Pingando ${data.count} projeto(s) em background... aguarde 🚀`, 'info');
@@ -439,7 +439,7 @@ async function discoverProjects() {
   result.style.display = 'none';
 
   try {
-    const res  = await fetch(`${API}/api/discover`, {
+    const res  = await apiFetch(`${API}/api/discover`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pat })
@@ -560,7 +560,7 @@ async function importSelected() {
   btn.innerHTML = '<span class="spinner"></span> Importando...';
 
   try {
-    const res  = await fetch(`${API}/api/import`, {
+    const res  = await apiFetch(`${API}/api/import`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pat: currentPAT, refs: selectedRefs })
@@ -611,7 +611,7 @@ async function testConnectionForm() {
   resultEl.style.display = 'none';
 
   try {
-    const res  = await fetch(`${API}/api/projects/test`, {
+    const res  = await apiFetch(`${API}/api/projects/test`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url, anonKey, serviceRoleKey: serviceKey || undefined })
@@ -655,7 +655,7 @@ async function handleAddProject(event) {
   btn.innerHTML = '<span class="spinner"></span> Adicionando...';
 
   try {
-    const res  = await fetch(`${API}/api/projects`, {
+    const res  = await apiFetch(`${API}/api/projects`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -701,7 +701,7 @@ async function openSetupModal(projectId) {
   document.getElementById('setupSQLContent').textContent = 'Carregando...';
 
   try {
-    const res  = await fetch(`${API}/api/projects/${projectId}/setup`, { method: 'POST' });
+    const res  = await apiFetch(`${API}/api/projects/${projectId}/setup`, { method: 'POST' });
     const data = await res.json();
 
     if (data.success && data.autoCreated) {
@@ -737,7 +737,7 @@ async function autoCreateTable() {
   btn.innerHTML = '<span class="spinner"></span> Criando tabela...';
 
   try {
-    const res  = await fetch(`${API}/api/projects/${setupProjectId}/setup`, { method: 'POST' });
+    const res  = await apiFetch(`${API}/api/projects/${setupProjectId}/setup`, { method: 'POST' });
     const data = await res.json();
     if (data.success) {
       toast('Tabela criada com sucesso! ✅', 'success');
@@ -760,7 +760,7 @@ async function confirmSetup() {
   btn.innerHTML = '<span class="spinner"></span> Verificando...';
 
   try {
-    const res  = await fetch(`${API}/api/projects/${setupProjectId}/confirm-setup`, { method: 'POST' });
+    const res  = await apiFetch(`${API}/api/projects/${setupProjectId}/confirm-setup`, { method: 'POST' });
     const data = await res.json();
     if (data.success) {
       toast('Configuração confirmada! Projeto ativo. ✅', 'success');

@@ -8,6 +8,7 @@ services:
     environment:
       - PORT=3131
       - DASHBOARD_PASSWORD
+      - ENCRYPTION_KEY
       - TZ=America/Sao_Paulo
     volumes:
       - keepalive_data:/app/data
