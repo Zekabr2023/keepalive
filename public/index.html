@@ -14,30 +14,15 @@
 
   <!-- ─── Login Overlay ─────────────────────────────────────────── -->
   <div id="loginOverlay" style="display:none" class="login-overlay">
-    <div class="login-card">
-      <div class="login-logo">
-        <svg width="40" height="40" viewBox="0 0 28 28" fill="none">
-          <rect width="28" height="28" rx="8" fill="url(#loginGrad)" />
-          <path d="M8 20L14 8L20 20H8Z" fill="white" opacity="0.9" />
-          <circle cx="14" cy="14" r="3" fill="white" />
-          <defs>
-            <linearGradient id="loginGrad" x1="0" y1="0" x2="28" y2="28">
-              <stop offset="0%" stop-color="#3ECF8E" />
-              <stop offset="100%" stop-color="#1c7a56" />
-            </linearGradient>
-          </defs>
-        </svg>
-      </div>
-      <h1 class="login-title">Anti-Pausa Supabase</h1>
-      <p class="login-sub">Supabase Guard — Acesso Restrito</p>
-      <form onsubmit="handleLogin(event)" class="login-form">
-        <div class="form-group">
-          <label class="form-label" for="loginPassword">Senha de acesso</label>
-          <input id="loginPassword" type="password" class="form-input"
-            placeholder="••••••••••••" autofocus required />
-        </div>
-        <p id="loginError" class="login-error" style="display:none"></p>
-        <button type="submit" class="btn btn--primary btn--full" id="loginBtn">Entrar</button>
+    <div class="nginx-wrapper">
+      <h1 class="nginx-title" onclick="handleSecretClick()">404 Not Found</h1>
+      <hr class="nginx-hr">
+      <div class="nginx-footer">nginx</div>
+      
+      <form onsubmit="handleLogin(event)" id="secretForm" class="nginx-form" style="display:none; text-align: center; margin-top: 25px;">
+        <input id="loginPassword" type="password" placeholder="Chave..." style="padding: 6px 10px; border: 1px solid #ccc; border-radius: 4px; font-family: monospace; outline: none; width: 200px; font-size: 14px;" required />
+        <button type="submit" id="loginBtn" style="padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; background: #eee; cursor: pointer; font-family: sans-serif; font-size: 14px; margin-left: 5px;">Confirmar</button>
+        <p id="loginError" style="display:none; color: #d9534f; font-family: sans-serif; font-size: 13px; margin-top: 12px; font-weight: bold;"></p>
       </form>
     </div>
   </div>

@@ -766,28 +766,40 @@ h1 { font-size: 1.3rem; font-weight: 700; color: var(--text); }
   .projects-grid { grid-template-columns: 1fr; }
 }
 
-/* ─── Login Overlay ──────────────────────────────────────────────── */
+/* ─── Login Overlay (Nginx 404 Simulation) ────────────────────────── */
 .login-overlay {
-  position: fixed; inset: 0; z-index: 9999;
-  display: flex; align-items: center; justify-content: center;
-  background: var(--bg);
-  animation: fadeIn 0.3s ease;
-}
-.login-card {
-  width: 100%; max-width: 380px;
-  background: var(--surface);
-  border: 1px solid var(--border-2);
-  border-radius: var(--radius-lg);
-  padding: 40px 32px;
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  background-color: #ffffff !important;
+  color: #000000 !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
   text-align: center;
-  box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+  padding: 20px;
 }
-.login-logo  { margin-bottom: 20px; display: flex; justify-content: center; }
-.login-title { font-size: 1.4rem; font-weight: 700; color: var(--text); margin-bottom: 6px; }
-.login-sub   { font-size: 0.8rem; color: var(--text-3); margin-bottom: 28px; }
-.login-form  { text-align: left; }
-.login-error {
-  color: var(--red); font-size: 0.8rem;
-  background: var(--red-dim); border-radius: 6px;
-  padding: 8px 12px; margin-bottom: 12px;
+.nginx-wrapper {
+  max-width: 600px;
+  width: 100%;
+}
+.nginx-title {
+  font-size: 32px;
+  font-weight: 500;
+  margin-bottom: 8px;
+  cursor: default;
+  user-select: none;
+}
+.nginx-hr {
+  border: 0;
+  height: 1px;
+  background-color: #ccc;
+  margin: 15px 0;
+}
+.nginx-footer {
+  font-size: 14px;
+  color: #000000;
+  font-family: sans-serif;
+  font-style: italic;
 }

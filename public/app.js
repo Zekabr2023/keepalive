@@ -31,9 +31,14 @@ async function apiFetch(url, opts = {}) {
   return res;
 }
 
+let secretClickCount = 0;
+
 function showLogin() {
   document.getElementById('loginOverlay').style.display = 'flex';
   document.querySelector('.app').style.display = 'none';
+  document.getElementById('secretForm').style.display = 'none';
+  document.getElementById('loginPassword').value = '';
+  secretClickCount = 0;
 }
 
 function hideLogin() {
@@ -41,13 +46,33 @@ function hideLogin() {
   document.querySelector('.app').style.display = '';
 }
 
+function handleSecretClick() {
+  secretClickCount++;
+  if (secretClickCount >= 5) {
+    document.getElementById('secretForm').style.display = 'block';
+    document.getElementById('loginPassword').focus();
+    secretClickCount = 0;
+  }
+}
+
+// Escuta Ctrl + Alt + K para abrir o campo de senha secretamente
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.altKey && e.key.toLowerCase() === 'k') {
+    document.getElementById('secretForm').style.display = 'block';
+    document.getElementById('loginPassword').focus();
+  }
+  if (e.key === 'Escape') {
+    document.getElementById('secretForm').style.display = 'none';
+  }
+});
+
 async function handleLogin(event) {
   if (event) event.preventDefault();
   const pw  = document.getElementById('loginPassword').value;
   const err = document.getElementById('loginError');
   const btn = document.getElementById('loginBtn');
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span> Entrando...';
+  btn.innerHTML = 'Processando...';
   err.style.display = 'none';
 
   try {
@@ -64,15 +89,15 @@ async function handleLogin(event) {
       hideLogin();
       loadDashboard();
     } else {
-      err.textContent = data.error || 'Senha incorreta';
-      err.style.display = '';
+      err.textContent = 'erro de conexão com o servidor';
+      err.style.display = 'block';
     }
   } catch (e) {
-    err.textContent = 'Erro de conexão';
-    err.style.display = '';
+    err.textContent = 'erro de conexão com o servidor';
+    err.style.display = 'block';
   } finally {
     btn.disabled = false;
-    btn.innerHTML = 'Entrar';
+    btn.innerHTML = 'Confirmar';
   }
 }
 
