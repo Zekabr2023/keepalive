@@ -272,6 +272,9 @@ function buildCardHTML(p) {
       ${(p.status === 'active' || p.status === 'error' || p.status === 'checking') ? `
         <button class="btn btn--ghost btn--sm" onclick="manualPing('${p.id}')" id="pingBtn-${p.id}" ${p.status === 'restoring' ? 'disabled' : ''}>
           ⚡ Checar
+        </button>
+        <button class="btn btn--outline btn--sm" onclick="openSetupModal('${p.id}')" title="Reinstala as permissões e o Cron Job no banco" ${p.status === 'restoring' ? 'disabled' : ''}>
+          ⚙️ Reinstalar SQL
         </button>` : ''}
       ${p.status === 'setup_required' ? `
         <button class="btn btn--ghost btn--sm" onclick="manualPing('${p.id}')" id="pingBtn-${p.id}">
