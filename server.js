@@ -299,7 +299,7 @@ async function pingProject(project) {
         status: 'active',
         lastError: null
       });
-      addLog(id, 'success', `Ping OK • ${name}`);
+      addLog(id, 'success', `Checagem OK • ${name}`);
       return { success: true };
     }
 
@@ -320,7 +320,7 @@ async function pingProject(project) {
       lastError: errMsg,
       status: newStatus
     });
-    addLog(id, 'error', `Ping falhou • ${name}: ${errMsg}`, { status: res.status });
+    addLog(id, 'error', `Checagem falhou • ${name}: ${errMsg}`, { status: res.status });
     return { success: false, error: errMsg, status: newStatus };
 
   } catch (err) {
@@ -328,7 +328,7 @@ async function pingProject(project) {
       lastError: err.message,
       status: 'error'
     });
-    addLog(id, 'error', `Ping falhou • ${name}: ${err.message}`);
+    addLog(id, 'error', `Checagem falhou • ${name}: ${err.message}`);
     return { success: false, error: err.message };
   }
 }
@@ -702,6 +702,41 @@ app.post('/api/projects/:id/refresh', async (req, res) => {
   res.json({ success: true, ...result });
 });
 
+// Restore project
+app.post('/api/projects/:id/restore', async (req, res) => {
+  const project = loadProjects().find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: 'Projeto não encontrado' });
+  
+  const pat = project.personalAccessToken;
+  const ref = project.projectRef || extractProjectRef(project.url);
+
+  if (!pat || !ref) {
+    return res.status(400).json({ error: 'Projeto não possui Personal Access Token ou Project Ref configurado' });
+  }
+
+  try {
+    const response = await fetch(`https://api.supabase.com/v1/projects/${ref}/restore`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${pat}`,
+        'Content-Type': 'application/json'
+      },
+      signal: AbortSignal.timeout(15000)
+    });
+
+    if (response.ok || response.status === 201) {
+      await updateProjectData(project.id, { status: 'restoring' });
+      addLog(project.id, 'info', `Solicitação de restauração enviada via API.`);
+      return res.json({ success: true });
+    }
+
+    const body = await response.json().catch(() => ({}));
+    return res.status(response.status).json({ success: false, error: body?.message || `HTTP ${response.status}` });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Pinga TODOS os projetos agora (ignora status, só respeita enabled)
 app.post('/api/ping-all', async (req, res) => {
   const projects = loadProjects().filter(p => p.enabled !== false);
@@ -969,6 +1004,17 @@ async function runScheduledPings() {
 
   for (const project of projects) {
     if (!project.enabled) continue;
+
+    // Se estiver restaurando, faz apenas testConnection leve
+    if (project.status === 'restoring') {
+      console.log(`[SCHED] Verificando restauração de ${project.name}...`);
+      const connResult = await testConnection(project);
+      if (connResult.connected) {
+        await updateProjectData(project.id, { status: 'active' });
+        addLog(project.id, 'success', `Restauração concluída • ${project.name}`);
+      }
+      continue;
+    }
 
     // Projetos travados em 'checking' ou 'error' há mais de 5 minutos: tenta recuperar
     if (project.status === 'checking' || project.status === 'error') {

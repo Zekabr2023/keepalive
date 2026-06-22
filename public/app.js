@@ -217,6 +217,7 @@ function buildCardHTML(p) {
     active:         '● Ativo',
     setup_required: '● Setup Necessário',
     paused:         '● Pausado',
+    restoring:      '● Restaurando...',
     error:          '● Erro',
     checking:       '● Verificando...',
     disabled:       '● Desativado'
@@ -246,15 +247,15 @@ function buildCardHTML(p) {
 
     <div class="card-stats">
       <div class="card-stat">
-        <div class="card-stat-label">Último ping</div>
+        <div class="card-stat-label">Última Checagem</div>
         <div class="card-stat-value card-stat-value--${p.lastPing ? 'green' : ''}">${lastPingStr}</div>
       </div>
       <div class="card-stat">
-        <div class="card-stat-label">Total de pings</div>
+        <div class="card-stat-label">Total de Checagens</div>
         <div class="card-stat-value">${p.pingCount || 0}</div>
       </div>
       <div class="card-stat" style="grid-column:1/-1">
-        <div class="card-stat-label">Próximo ping</div>
+        <div class="card-stat-label">Próxima Checagem</div>
         <div class="card-stat-value card-stat-value--${p.status === 'active' ? 'yellow' : ''}"
              id="nextPing-${p.id}">${nextPingStr}</div>
       </div>
@@ -269,12 +270,12 @@ function buildCardHTML(p) {
 
     <div class="card-actions">
       ${(p.status === 'active' || p.status === 'error' || p.status === 'checking') ? `
-        <button class="btn btn--ghost btn--sm" onclick="manualPing('${p.id}')" id="pingBtn-${p.id}">
-          ⚡ Ping
+        <button class="btn btn--ghost btn--sm" onclick="manualPing('${p.id}')" id="pingBtn-${p.id}" ${p.status === 'restoring' ? 'disabled' : ''}>
+          ⚡ Checar
         </button>` : ''}
       ${p.status === 'setup_required' ? `
         <button class="btn btn--ghost btn--sm" onclick="manualPing('${p.id}')" id="pingBtn-${p.id}">
-          ⚡ Forçar Ping
+          ⚡ Forçar Checagem
         </button>
         <button class="btn btn--yellow btn--sm" onclick="openSetupModal('${p.id}')">
           ⚙️ Configurar Tabela
@@ -282,11 +283,15 @@ function buildCardHTML(p) {
       ${p.status === 'paused' ? `
         <button class="btn btn--outline btn--sm" onclick="refreshProject('${p.id}')">
           🔄 Verificar Status
-        </button>` : ''}
-      <button class="btn btn--ghost btn--sm" onclick="toggleProject('${p.id}', ${p.enabled !== false})">
+        </button>
+        ${p.personalAccessToken ? `
+        <button class="btn btn--yellow btn--sm" onclick="restoreProject('${p.id}')" id="restoreBtn-${p.id}">
+          🚀 Restaurar
+        </button>` : ''}` : ''}
+      <button class="btn btn--ghost btn--sm" onclick="toggleProject('${p.id}', ${p.enabled !== false})" ${p.status === 'restoring' ? 'disabled' : ''}>
         ${p.enabled !== false ? '⏸ Pausar' : '▶ Ativar'}
       </button>
-      <button class="btn btn--danger btn--sm" onclick="deleteProject('${p.id}', '${escapeHTML(p.name)}')">
+      <button class="btn btn--danger btn--sm" onclick="deleteProject('${p.id}', '${escapeHTML(p.name)}')" ${p.status === 'restoring' ? 'disabled' : ''}>
         🗑
       </button>
     </div>
@@ -343,17 +348,17 @@ function updateCountdown() {
 async function manualPing(id) {
   const btn = document.getElementById(`pingBtn-${id}`);
   const card = document.querySelector(`[data-id="${id}"]`);
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Pingando...'; }
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Checando...'; }
   if (card) card.classList.add('pinging');
 
   try {
     const res  = await apiFetch(`${API}/api/projects/${id}/ping`, { method: 'POST' });
     const data = await res.json();
     if (data.success) {
-      toast('Ping realizado com sucesso! ✅', 'success');
+      toast('Checagem realizada com sucesso! ✅', 'success');
       await loadDashboard();
     } else {
-      toast(`Ping falhou: ${data.error}`, 'error');
+      toast(`Checagem falhou: ${data.error}`, 'error');
     }
   } catch (err) {
     toast(`Erro: ${err.message}`, 'error');
@@ -398,6 +403,26 @@ async function refreshProject(id) {
   }
 }
 
+async function restoreProject(id) {
+  const btn = document.getElementById(`restoreBtn-${id}`);
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Solicitando...'; }
+
+  try {
+    const res  = await apiFetch(`${API}/api/projects/${id}/restore`, { method: 'POST' });
+    const data = await res.json();
+    if (data.success) {
+      toast('Solicitação de restauração enviada. Isso pode levar alguns minutos.', 'info');
+      await loadDashboard();
+    } else {
+      toast(`Falha ao restaurar: ${data.error}`, 'error');
+    }
+  } catch (err) {
+    toast(`Erro: ${err.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '🚀 Restaurar'; }
+  }
+}
+
 async function refreshAll() {
   const btn = document.getElementById('btnRefresh');
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Atualizando...'; }
@@ -408,24 +433,24 @@ async function refreshAll() {
 
 async function pingAll() {
   const btn = document.getElementById('btnPingAll');
-  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Pingando...'; }
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Checando...'; }
 
   try {
     const res  = await apiFetch(`${API}/api/ping-all`, { method: 'POST' });
     const data = await res.json();
     if (data.started) {
-      toast(`Pingando ${data.count} projeto(s) em background... aguarde 🚀`, 'info');
+      toast(`Checando ${data.count} projeto(s) em background... aguarde 🚀`, 'info');
       // Atualiza o dashboard após alguns segundos
       setTimeout(loadDashboard, 8000);
       setTimeout(loadDashboard, 20000);
     } else {
-      toast('Nenhum projeto ativo para pingar', 'warning');
+      toast('Nenhum projeto ativo para checar', 'warning');
     }
   } catch (err) {
     toast(`Erro: ${err.message}`, 'error');
   } finally {
     setTimeout(() => {
-      if (btn) { btn.disabled = false; btn.innerHTML = '<span>⚡</span> Pingar Todos'; }
+      if (btn) { btn.disabled = false; btn.innerHTML = '<span>⚡</span> Checar Todos'; }
     }, 5000);
   }
 }
