@@ -89,11 +89,11 @@ async function handleLogin(event) {
       hideLogin();
       loadDashboard();
     } else {
-      err.textContent = 'erro de conexão com o servidor';
+      err.textContent = 'Erro de conexão com o servidor';
       err.style.display = 'block';
     }
   } catch (e) {
-    err.textContent = 'erro de conexão com o servidor';
+    err.textContent = 'Erro de conexão com o servidor';
     err.style.display = 'block';
   } finally {
     btn.disabled = false;
